@@ -2,52 +2,149 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"strings"
+	"log"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-type Biodata struct {
-	Nama, Alamat, Pekerjaan, Alasan string
+var db *gorm.DB
+
+// Order model
+type Order struct {
+	ID           uint       `json:"id" gorm:"primaryKey"`
+	CustomerName string     `json:"customer_name"`
+	OrderedAt    time.Time  `json:"ordered_at"`
+	Items        []Item     `json:"items,omitempty" gorm:"foreignKey:OrderID"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty" gorm:"index"`
 }
 
-func getBiodata(absen int) Biodata {
-	biodataList := map[int]Biodata{
-		1: {"Khaerul", "Jalan Mawar", "Developer", "Suka bahasa pemrograman Go"},
-		2: {"Latif", "Jalan Gajah", "Designer", "Suka bahasa pemrograman Go"},
-	}
-	biodata, found := biodataList[absen]
-
-	if !found {
-		fmt.Println("Id Tidak Ditemukan")
-		os.Exit(1)
-	}
-
-	return biodata
+// Item model
+type Item struct {
+	ID          uint   `json:"id" gorm:"primaryKey"`
+	Code        string `json:"code"`
+	Description string `json:"description"`
+	Quantity    int64  `json:"quantity"`
+	OrderID     uint   `json:"-"`
 }
 
-func showBiodata(biodata Biodata) {
-	fmt.Println("Biodata")
-	fmt.Println(strings.Repeat("#", 30))
-	fmt.Println("Nama:", biodata.Nama)
-	fmt.Println("Alamat:", biodata.Alamat)
-	fmt.Println("Pekerjaan:", biodata.Pekerjaan)
-	fmt.Println("Alasan Memilih Kelas Golang:", biodata.Alasan)
-	fmt.Println(strings.Repeat("#", 50))
+func initDB() {
+	dsn := "host=localhost user=postgres password=postgres dbname=assignment_2 sslmode=disable"
+	var err error
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	db.AutoMigrate(&Order{}, &Item{})
+}
+
+func createOrder(c *gin.Context) {
+	var request OrderRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	order := Order{
+		OrderedAt:    request.OrderedAt,
+		CustomerName: request.CustomerName,
+		Items:        request.Items,
+	}
+
+	db.Create(&order)
+	c.JSON(http.StatusCreated, convertToOrderResponse(order))
+}
+
+func getOrders(c *gin.Context) {
+	var orders []Order
+	db.Preload("Items").Find(&orders)
+
+	var response []OrderResponse
+	for _, order := range orders {
+		response = append(response, convertToOrderResponse(order))
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+func updateOrder(c *gin.Context) {
+	orderID := c.Param("id")
+
+	var request OrderRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var existingOrder Order
+	if err := db.Preload("Items").Where("id = ?", orderID).First(&existingOrder).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
+		return
+	}
+
+	// Update existing order with request data
+	existingOrder.OrderedAt = request.OrderedAt
+	existingOrder.CustomerName = request.CustomerName
+	existingOrder.Items = request.Items
+
+	db.Save(&existingOrder)
+	c.JSON(http.StatusOK, convertToOrderResponse(existingOrder))
+}
+
+func deleteOrder(c *gin.Context) {
+	orderID := c.Param("id")
+
+	var existingOrder Order
+	if err := db.Where("id = ?", orderID).First(&existingOrder).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
+		return
+	}
+
+	db.Delete(&existingOrder)
+	c.JSON(http.StatusNoContent, gin.H{"message": "Success delete"})
+}
+
+func convertToOrderResponse(order Order) OrderResponse {
+	return OrderResponse{
+		ID:           order.ID,
+		OrderedAt:    order.OrderedAt,
+		CustomerName: order.CustomerName,
+		Items:        order.Items,
+	}
+}
+
+type OrderRequest struct {
+	OrderedAt    time.Time `json:"orderedAt"`
+	CustomerName string    `json:"customerName"`
+	Items        []Item    `json:"items"`
+}
+
+type OrderResponse struct {
+	ID           uint      `json:"id"`
+	OrderedAt    time.Time `json:"orderedAt"`
+	CustomerName string    `json:"customerName"`
+	Items        []Item    `json:"items,omitempty"`
 }
 
 func main() {
-	args := os.Args
+	initDB()
 
-	absen := args[1]
+	r := gin.Default()
 
-	var absenID int
-	_, err := fmt.Sscanf(absen, "%d", &absenID)
-	if err != nil {
-		fmt.Println("Harus berupa angka")
-		os.Exit(1)
+	r.POST("/orders", createOrder)
+	r.GET("/orders", getOrders)
+	r.PUT("/orders/:id", updateOrder)
+	r.DELETE("/orders/:id", deleteOrder)
+
+	port := 8080
+	serverAddress := fmt.Sprintf(":%d", port)
+	if err := r.Run(serverAddress); err != nil {
+		log.Fatal(err)
 	}
-
-	biodata := getBiodata(absenID)
-
-	showBiodata(biodata)
 }
